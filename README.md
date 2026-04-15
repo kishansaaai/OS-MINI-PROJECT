@@ -193,25 +193,25 @@ This compiles only the user-space binary and does **not** require `sudo`, kernel
 ### SS1 — Multi-Container Supervision
 
 Two containers (`alpha` and `beta`) were started under a single supervisor process. The right terminal shows `sudo ./engine ps` output confirming both containers are tracked concurrently with their host PIDs, states (`running`), start timestamps, and memory limits (`alpha`: SOFT=48 MiB, HARD=80 MiB; `beta`: SOFT=64 MiB, HARD=96 MiB). The left pane shows the supervisor's `[supervisor] started container alpha` and `[supervisor] started container beta` log messages.
-
+![SS1](screenshots/ss1.png)
 ---
 
 ### SS2 — Metadata Tracking
 
 The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `PID`, `STATE`, `STARTED`, `SOFT(MiB)`, `HARD(MiB)`. Both `alpha` and `beta` are shown as `running` with their respective start times and memory limits. These fields map directly to `container_record_t` members: `.id`, `.host_pid`, `.state`, `.started_at`, `.soft_limit_bytes`, and `.hard_limit_bytes`.
-
+![SS2](screenshots/ss2.png)
 ---
 
 ### SS3 — Bounded-Buffer Logging
 
 Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /bin/echo hello`. The supervisor's producer thread read `hello` from the pipe, pushed it into `bounded_buffer_t`, and the consumer thread wrote it to `logs/gamma.log`. Running `./engine logs gamma` retrieved the stored output. An earlier attempt with a duplicate rootfs correctly failed with `ERROR: rootfs already in use by container 'alpha'`, confirming the rootfs collision check in `launch_container()`. The left pane shows `[supervisor] container gamma (pid 8160) exited → exited`.
-
+![SS3](screenshots/ss3.png)
 ---
 
 ### SS4 — CLI and IPC
 
 The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a separate terminal. The CLI process connected to `/tmp/mini_runtime.sock`, serialized a `control_request_t` with `kind = CMD_START`, and the supervisor responded with `Started container 'delta' (pid 8317)`. The left pane confirms `[supervisor] started container delta pid=8317`, demonstrating the UNIX domain socket control channel (Path B) end-to-end.
-
+![SS4](screenshots/ss4.png)
 ---
 
 ### SS5 — Soft-Limit Warning
@@ -223,7 +223,7 @@ Container `softtest` was started with `sudo ./engine start softtest ./rootfs-sof
 ```
 
 The process was **not** terminated, confirming the soft limit is warning-only.
-
+![SS5](screenshots/ss5.png)
 ---
 
 ### SS6 — Hard-Limit Enforcement
@@ -233,7 +233,7 @@ Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-har
 ```
 [supervisor] container hardtest (pid 11761) exited → hard_limit_killed
 ```
-
+![SS6](screenshots/ss6.png)
 ---
 
 ### SS7 — Scheduling Experiment
@@ -247,13 +247,14 @@ PID    NI  COMMAND      %CPU
 ```
 
 Both values are similar because `memory_hog` is memory-bound rather than CPU-bound; most time is spent in `malloc` and `memset` rather than on the run queue. See Section 6 for full analysis.
-
+![SS7](screenshots/ss7.png)
 ---
 
 ### SS8 — Clean Teardown
 
 After `sudo ./engine stop alpha` and `sudo ./engine stop beta`, the supervisor set `stop_requested = 1` on both containers before sending `SIGTERM`. The left pane shows both containers exiting as `stopped`, followed by `[supervisor] shutting down...` and `[supervisor] exited cleanly`. Running `ps aux | grep engine | grep defunct` on the right returned no results, confirming no zombie processes remained. Only the supervisor binary itself and `engine-simple` appear in the broader `ps aux | grep engine` output.
 
+![SS8](screenshots/ss8.png)
 ---
 
 ## 4. Engineering Analysis
