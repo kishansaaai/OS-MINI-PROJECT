@@ -194,7 +194,7 @@ This compiles only the user-space binary and does **not** require `sudo`, kernel
 
 ### SS1 — Multi-Container Supervision
 
-Two containers (`alpha` and `beta`) were started under a single supervisor process. The right terminal shows `sudo ./engine ps` output confirming both containers are tracked concurrently with their host PIDs, states (`running`), start timestamps, and memory limits (`alpha`: SOFT=48 MiB, HARD=80 MiB; `beta`: SOFT=64 MiB, HARD=96 MiB). The left pane shows the supervisor's `[supervisor] started container alpha` and `[supervisor] started container beta` log messages.
+Two containers (`alpha` and `beta`) were started under a single supervisor process. The **right terminal** shows the output of `sudo ./engine ps`, confirming both containers are tracked concurrently with their host PIDs (7806 and 7814), state (`running`), start timestamps (`2026-04-14 16:18:12`), and memory limits (`alpha`: SOFT=48 MiB, HARD=80 MiB; `beta`: SOFT=64 MiB, HARD=96 MiB). The **left pane** shows the supervisor's log messages: `[supervisor] started container alpha pid=7806` and `[supervisor] started container beta pid=7814`.
 
 ![SS1 — Two containers running concurrently under one supervisor](screenshots/ss1.png)
 
@@ -202,7 +202,7 @@ Two containers (`alpha` and `beta`) were started under a single supervisor proce
 
 ### SS2 — Metadata Tracking
 
-The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `PID`, `STATE`, `STARTED`, `SOFT(MiB)`, `HARD(MiB)`. Both `alpha` and `beta` are shown as `running` with their respective start times and memory limits. These fields map directly to `container_record_t` members: `.id`, `.host_pid`, `.state`, `.started_at`, `.soft_limit_bytes`, and `.hard_limit_bytes`.
+The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `PID`, `STATE`, `STARTED`, `SOFT(MiB)`, `HARD(MiB)`. Both `alpha` (PID 7806, SOFT=48, HARD=80) and `beta` (PID 7814, SOFT=64, HARD=96) are listed as `running` with their respective start timestamps (`2026-04-14 16:18:12`). These fields map directly to `container_record_t` members: `.id`, `.host_pid`, `.state`, `.started_at`, `.soft_limit_bytes`, and `.hard_limit_bytes`.
 
 ![SS2 — engine ps output showing container metadata](screenshots/ss2.png)
 
@@ -210,7 +210,7 @@ The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `P
 
 ### SS3 — Bounded-Buffer Logging
 
-Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /bin/echo hello`. The supervisor's producer thread read `hello` from the pipe, pushed it into `bounded_buffer_t`, and the consumer thread wrote it to `logs/gamma.log`. Running `./engine logs gamma` retrieved the stored output. An earlier attempt with a duplicate rootfs correctly failed with `ERROR: rootfs already in use by container 'alpha'`, confirming the rootfs collision check in `launch_container()`. The left pane shows `[supervisor] container gamma (pid 8160) exited → exited`.
+Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /bin/echo hello`. The supervisor's producer thread read `hello` from the pipe and pushed it into `bounded_buffer_t`; the consumer thread wrote it to `logs/gamma.log`. Running `./engine logs gamma` retrieved and printed `hello`, confirming the full producer→buffer→consumer→file pipeline. The left pane also shows an earlier duplicate-rootfs attempt correctly rejected with `ERROR: rootfs already in use by container 'alpha'`, and the gamma container's clean exit: `[supervisor] container gamma (pid 8166) exited → exited`.
 
 ![SS3 — Bounded-buffer log pipeline and engine logs output](screenshots/ss3.png)
 
@@ -218,7 +218,7 @@ Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /b
 
 ### SS4 — CLI and IPC
 
-The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a separate terminal. The CLI process connected to `/tmp/mini_runtime.sock`, serialized a `control_request_t` with `kind = CMD_START`, and the supervisor responded with `Started container 'delta' (pid 8317)`. The left pane confirms `[supervisor] started container delta pid=8317`, demonstrating the UNIX domain socket control channel (Path B) end-to-end.
+The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a separate terminal (right pane). The CLI process connected to `/tmp/mini_runtime.sock`, serialized a `control_request_t` with `kind = CMD_START`, and received back `Started container 'delta' (pid 8317)`. The left pane confirms `[supervisor] started container delta pid=8317`, demonstrating the UNIX domain socket control channel (Path B) end-to-end.
 
 ![SS4 — CLI command sent over UNIX socket and supervisor response](screenshots/ss4.png)
 
@@ -226,13 +226,13 @@ The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a
 
 ### SS5 — Soft-Limit Warning
 
-Container `softtest` was started with `sudo ./engine start softtest ./rootfs-soft5 /memory_hog --soft-mib 1 --hard-mib 100`. When RSS exceeded 1 MiB, the kernel module's 100 ms timer callback called `log_soft_limit_event()`, issuing a `KERN_WARNING` via `printk`. Running `dmesg | grep SOFT` showed:
+Container `softtest` was started with `sudo ./engine start softtest ./rootfs-soft5 /memory_hog --soft-mib 1 --hard-mib 100`. When RSS exceeded 1 MiB, the kernel module's 100 ms timer callback invoked `log_soft_limit_event()`, issuing a `KERN_WARNING` via `printk`. Running `sudo dmesg | grep SOFT` showed:
 
 ```
-[container_monitor] SOFT LIMIT container=softtest pid=11498 rss=rss=8986624 limit=1048576
+[ 7883.077064] [container_monitor] SOFT LIMIT container=softtest pid=11498 rss=8986624 limit=1048576
 ```
 
-The process was **not** terminated, confirming the soft limit is warning-only.
+The process was **not** terminated — the soft limit is warning-only. The supervisor log on the left shows `[supervisor] started container softtest pid=11498` still running.
 
 ![SS5 — dmesg showing soft-limit warning with process still running](screenshots/ss5.png)
 
@@ -240,10 +240,16 @@ The process was **not** terminated, confirming the soft limit is warning-only.
 
 ### SS6 — Hard-Limit Enforcement
 
-Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-hard /memory_hog --soft-mib 1 --hard-mib 2`. When RSS exceeded 2 MiB, the timer callback called `kill_process()`, which used `send_sig(SIGKILL, task, 0)` to terminate the process. The supervisor's `reap_children()` detected `SIGKILL` with `stop_requested = 0` and set the state to `CONTAINER_KILLED`. The left pane confirms:
+Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-hard /memory_hog --soft-mib 1 --hard-mib 2`. When RSS exceeded 2 MiB, the timer callback invoked `kill_process()`, which called `send_sig(SIGKILL, task, 0)` to terminate the process. Running `sudo dmesg | grep HARD` showed:
 
 ```
-[supervisor] container hardtest (pid 11761) exited → hard_limit_killed
+[ 9328.366418] [container_monitor] HARD LIMIT container=hardtest pid=11781 rss=5898240 limit=2097152
+```
+
+The supervisor's `reap_children()` detected the kill with `stop_requested = 0` and set the container state to `CONTAINER_KILLED`. The left pane confirms:
+
+```
+[supervisor] container hardtest (pid 11781) exited → hard_limit_killed
 ```
 
 ![SS6 — Supervisor log confirming hard-limit kill and container state update](screenshots/ss6.png)
@@ -252,7 +258,7 @@ Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-har
 
 ### SS7 — Scheduling Experiment
 
-Two containers ran `memory_hog` simultaneously with different nice values: `alpha` at `nice -10`, `beta` at `nice +10`. Running `ps -o pid,ni,comm,%cpu -p 23761,23769` showed:
+Two containers ran `/memory_hog` simultaneously with contrasting nice values: `alpha` at `nice -10` (higher priority) and `beta` at `nice +10` (lower priority). Running `ps -o pid,ni,comm,%cpu -p 23761,23769` showed:
 
 ```
 PID    NI  COMMAND      %CPU
@@ -260,7 +266,7 @@ PID    NI  COMMAND      %CPU
 23769   10  memory_hog   1.5
 ```
 
-Both values are similar because `memory_hog` is memory-bound rather than CPU-bound; most time is spent in `malloc` and `memset` rather than on the run queue. See Section 6 for full analysis.
+The CPU usage values are close because `memory_hog` is memory-bound — most time is spent in `malloc` and `memset`, triggering page faults rather than CPU computation. When processes frequently block on memory operations, CFS weight differences have limited impact. For a CPU-bound workload like `cpu_hog`, a nice-value gap of 20 would produce a clearly asymmetric CPU split (~9× weight advantage for `alpha`). The experiment confirms that scheduling priority effects are most pronounced under CPU contention, not memory pressure.
 
 ![SS7 — ps output showing CPU usage of two containers with different nice values](screenshots/ss7.png)
 
@@ -268,7 +274,16 @@ Both values are similar because `memory_hog` is memory-bound rather than CPU-bou
 
 ### SS8 — Clean Teardown
 
-After `sudo ./engine stop alpha` and `sudo ./engine stop beta`, the supervisor set `stop_requested = 1` on both containers before sending `SIGTERM`. The left pane shows both containers exiting as `stopped`, followed by `[supervisor] shutting down...` and `[supervisor] exited cleanly`. Running `ps aux | grep engine | grep defunct` on the right returned no results, confirming no zombie processes remained. Only the supervisor binary itself and `engine-simple` appear in the broader `ps aux | grep engine` output.
+After `sudo ./engine stop alpha` and `sudo ./engine stop beta`, the supervisor set `stop_requested = 1` on both containers before sending `SIGTERM`. The **left pane** shows both containers exiting as `stopped`:
+
+```
+[supervisor] container alpha (pid 23761) exited → stopped
+[supervisor] container beta (pid 23769) exited → stopped
+[supervisor] shutting down...
+[supervisor] exited cleanly
+```
+
+The **right pane** shows `ps aux | grep defunct` returned no results, and `ps aux | grep engine` lists only the `grep` process itself and an unrelated `ibus-engine-simple` binary — confirming zero zombie processes remain after the orderly shutdown.
 
 ![SS8 — Clean supervisor shutdown with no zombies in ps output](screenshots/ss8.png)
 
@@ -322,7 +337,7 @@ Enforcement belongs in kernel space because a user-space polling loop reading `/
 
 Linux CFS assigns CPU time proportional to per-process weight, derived from the nice value. `nice()` is called inside `child_fn()` before `execv()` using `cfg->nice_value`, which comes from the `--nice` CLI flag stored in `container_record_t.nice_value`.
 
-In the experiment (SS7), two containers ran `memory_hog` with `nice -10` (alpha) and `+10` (beta). The observed `%CPU` values were similar (1.2 vs 1.5). This is expected because `memory_hog` spends most time in `malloc()` and `memset()`, triggering page faults and kernel memory allocation rather than CPU computation. When processes frequently block on memory operations, they spend less time on the run queue, limiting how much CFS weight differences can express themselves.
+In the experiment (SS7), two containers ran `memory_hog` with `nice -10` (alpha) and `+10` (beta). The observed `%CPU` values were similar (1.7 vs 1.5). This is expected because `memory_hog` spends most time in `malloc()` and `memset()`, triggering page faults and kernel memory allocation rather than CPU computation. When processes frequently block on memory operations, they spend less time on the run queue, limiting how much CFS weight differences can express themselves.
 
 For a CPU-bound workload like `cpu_hog` (which loops continuously with no blocking), a nice-value gap of 20 would produce a clearly asymmetric CPU split. The experiment confirms that nice-value scheduling effects are most visible under CPU contention, not memory or I/O contention.
 
@@ -399,7 +414,7 @@ Two containers were started simultaneously, both running `memory_hog` (allocatin
 
 ```
 PID    NI  COMMAND      %CPU
-23761  -10  memory_hog   1.2
+23761  -10  memory_hog   1.7
 23769   10  memory_hog   1.5
 ```
 
@@ -409,7 +424,7 @@ PID    NI  COMMAND      %CPU
 
 Both containers showed similar CPU usage at the `ps` snapshot. `memory_hog` repeatedly calls `malloc()` and `memset()`, causing page faults and kernel-side memory allocation. The process is not continuously runnable — it frequently blocks waiting on memory operations. When neither process is consistently on the run queue, CFS has fewer scheduling decisions to make, and weight differences have limited impact.
 
-The slight difference in values (1.2 vs 1.5) is within measurement noise for a single `ps` snapshot and does not indicate a scheduling anomaly. It reflects short-window CPU averaging at the moment of sampling.
+The slight difference in values (1.7 vs 1.5) is within measurement noise for a single `ps` snapshot and does not indicate a scheduling anomaly. It reflects short-window CPU averaging at the moment of sampling.
 
 ---
 
