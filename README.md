@@ -229,7 +229,7 @@ The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a
 Container `softtest` was started with `sudo ./engine start softtest ./rootfs-soft5 /memory_hog --soft-mib 1 --hard-mib 100`. When RSS exceeded 1 MiB, the kernel module's 100 ms timer callback called `log_soft_limit_event()`, issuing a `KERN_WARNING` via `printk`. Running `dmesg | grep SOFT` showed:
 
 ```
-[container_monitor] SOFT LIMIT container=softtest pid=11498 rss=8060624 limit=1048576
+[container_monitor] SOFT LIMIT container=softtest pid=11498 rss=rss=8986624 limit=1048576
 ```
 
 The process was **not** terminated, confirming the soft limit is warning-only.
@@ -256,7 +256,7 @@ Two containers ran `memory_hog` simultaneously with different nice values: `alph
 
 ```
 PID    NI  COMMAND      %CPU
-23761  -10  memory_hog   1.2
+23761  -10  memory_hog   1.7
 23769   10  memory_hog   1.5
 ```
 
