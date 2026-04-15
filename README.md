@@ -4,7 +4,7 @@
 
 ## 1. Team Information
 
-|       Name          |     SRN       |
+| Name                | SRN           |
 |---------------------|---------------|
 | SAI KISHAN A        | PES1UG24CS608 |
 | SAMATMA A BHARADWAJ | PES1UG24CS609 |
@@ -127,9 +127,11 @@ dmesg | grep SOFT
 ```
 
 Expected `dmesg` output:
+
 ```
 [container_monitor] SOFT LIMIT container=softtest pid=<pid> rss=<bytes> limit=1048576
 ```
+
 The process continues running — the soft limit is warning-only.
 
 ---
@@ -193,25 +195,33 @@ This compiles only the user-space binary and does **not** require `sudo`, kernel
 ### SS1 — Multi-Container Supervision
 
 Two containers (`alpha` and `beta`) were started under a single supervisor process. The right terminal shows `sudo ./engine ps` output confirming both containers are tracked concurrently with their host PIDs, states (`running`), start timestamps, and memory limits (`alpha`: SOFT=48 MiB, HARD=80 MiB; `beta`: SOFT=64 MiB, HARD=96 MiB). The left pane shows the supervisor's `[supervisor] started container alpha` and `[supervisor] started container beta` log messages.
-![SS1](screenshots/ss1.png)
+
+![SS1 — Two containers running concurrently under one supervisor](screenshots/ss1.png)
+
 ---
 
 ### SS2 — Metadata Tracking
 
 The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `PID`, `STATE`, `STARTED`, `SOFT(MiB)`, `HARD(MiB)`. Both `alpha` and `beta` are shown as `running` with their respective start times and memory limits. These fields map directly to `container_record_t` members: `.id`, `.host_pid`, `.state`, `.started_at`, `.soft_limit_bytes`, and `.hard_limit_bytes`.
-![SS2](screenshots/ss2.png)
+
+![SS2 — engine ps output showing container metadata](screenshots/ss2.png)
+
 ---
 
 ### SS3 — Bounded-Buffer Logging
 
 Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /bin/echo hello`. The supervisor's producer thread read `hello` from the pipe, pushed it into `bounded_buffer_t`, and the consumer thread wrote it to `logs/gamma.log`. Running `./engine logs gamma` retrieved the stored output. An earlier attempt with a duplicate rootfs correctly failed with `ERROR: rootfs already in use by container 'alpha'`, confirming the rootfs collision check in `launch_container()`. The left pane shows `[supervisor] container gamma (pid 8160) exited → exited`.
-![SS3](screenshots/ss3.png)
+
+![SS3 — Bounded-buffer log pipeline and engine logs output](screenshots/ss3.png)
+
 ---
 
 ### SS4 — CLI and IPC
 
 The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a separate terminal. The CLI process connected to `/tmp/mini_runtime.sock`, serialized a `control_request_t` with `kind = CMD_START`, and the supervisor responded with `Started container 'delta' (pid 8317)`. The left pane confirms `[supervisor] started container delta pid=8317`, demonstrating the UNIX domain socket control channel (Path B) end-to-end.
-![SS4](screenshots/ss4.png)
+
+![SS4 — CLI command sent over UNIX socket and supervisor response](screenshots/ss4.png)
+
 ---
 
 ### SS5 — Soft-Limit Warning
@@ -223,7 +233,9 @@ Container `softtest` was started with `sudo ./engine start softtest ./rootfs-sof
 ```
 
 The process was **not** terminated, confirming the soft limit is warning-only.
-![SS5](screenshots/ss5.png)
+
+![SS5 — dmesg showing soft-limit warning with process still running](screenshots/ss5.png)
+
 ---
 
 ### SS6 — Hard-Limit Enforcement
@@ -233,7 +245,9 @@ Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-har
 ```
 [supervisor] container hardtest (pid 11761) exited → hard_limit_killed
 ```
-![SS6](screenshots/ss6.png)
+
+![SS6 — Supervisor log confirming hard-limit kill and container state update](screenshots/ss6.png)
+
 ---
 
 ### SS7 — Scheduling Experiment
@@ -247,14 +261,17 @@ PID    NI  COMMAND      %CPU
 ```
 
 Both values are similar because `memory_hog` is memory-bound rather than CPU-bound; most time is spent in `malloc` and `memset` rather than on the run queue. See Section 6 for full analysis.
-![SS7](screenshots/ss7.png)
+
+![SS7 — ps output showing CPU usage of two containers with different nice values](screenshots/ss7.png)
+
 ---
 
 ### SS8 — Clean Teardown
 
 After `sudo ./engine stop alpha` and `sudo ./engine stop beta`, the supervisor set `stop_requested = 1` on both containers before sending `SIGTERM`. The left pane shows both containers exiting as `stopped`, followed by `[supervisor] shutting down...` and `[supervisor] exited cleanly`. Running `ps aux | grep engine | grep defunct` on the right returned no results, confirming no zombie processes remained. Only the supervisor binary itself and `engine-simple` appear in the broader `ps aux | grep engine` output.
 
-![SS8](screenshots/ss8.png)
+![SS8 — Clean supervisor shutdown with no zombies in ps output](screenshots/ss8.png)
+
 ---
 
 ## 4. Engineering Analysis
@@ -271,7 +288,7 @@ The host kernel is still shared across all containers. Network, IPC, and cgroup 
 
 ### 4.2 Supervisor and Process Lifecycle
 
-The supervisor is a long-running daemon started once. CLI commands are short-lived processes that connect to the supervisor over the UNIX socket, send one request, and exit. This split is useful because it decouples the lifetime of CLI invocations from the lifetime of containers — containers keep running even after the CLI process exits.
+The supervisor is a long-running daemon started once. CLI commands are short-lived processes that connect to the supervisor over the UNIX socket, send one request, and exit. This split decouples the lifetime of CLI invocations from the lifetime of containers — containers keep running even after the CLI process exits.
 
 The supervisor uses the **self-pipe trick** for `SIGCHLD`. `sigchld_handler()` writes one byte to `sigchld_pipe[1]`. The main `select()` loop detects readability on `sigchld_pipe[0]`, drains the pipe, and calls `reap_children()` safely in process context. `reap_children()` calls `waitpid(-1, &status, WNOHANG)` in a loop until all exited children are reaped, preventing zombie accumulation.
 
@@ -368,7 +385,8 @@ For a CPU-bound workload like `cpu_hog` (which loops continuously with no blocki
 ### Experiment Setup
 
 Two containers were started simultaneously, both running `memory_hog` (allocating 8 MiB per second by default), with different nice values:
-“The snapshot does not reflect steady-state scheduling and is affected by memory-bound blocking behavior.”
+
+> **Note:** The snapshot below does not reflect steady-state scheduling and is affected by memory-bound blocking behavior.
 
 | Container | PID   | Nice Value | Workload   |
 |-----------|-------|------------|------------|
