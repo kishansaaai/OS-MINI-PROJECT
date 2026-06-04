@@ -1,17 +1,6 @@
-# Multi-Container Runtime — OS Jackfruit
+# Multi-Container Runtime 
 
----
-
-## 1. Team Information
-
-| Name                | SRN           |
-|---------------------|---------------|
-| SAI KISHAN A        | PES1UG24CS608 |
-| SAMATMA A BHARADWAJ | PES1UG24CS609 |
-
----
-
-## 2. Build, Load, and Run Instructions
+## Build, Load, and Run Instructions
 
 ### Prerequisites
 
