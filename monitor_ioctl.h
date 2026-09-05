@@ -3,18 +3,18 @@
 
 #ifdef __KERNEL__
 #include <linux/ioctl.h>
-#include <linux/types.h>
 #else
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #endif
+#include <linux/types.h>
 
-#define MONITOR_NAME_LEN 32
+#define MONITOR_NAME_LEN 64
 
 struct monitor_request {
-    pid_t pid;
-    unsigned long soft_limit_bytes;
-    unsigned long hard_limit_bytes;
+    __s32 pid;
+    __u32 reserved;
+    __aligned_u64 soft_limit_bytes;
+    __aligned_u64 hard_limit_bytes;
     char container_id[MONITOR_NAME_LEN];
 };
 

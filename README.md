@@ -1,428 +1,160 @@
-# Multi-Container Runtime 
+# Multi-Container Runtime
 
-## Build, Load, and Run Instructions
+A small Linux runtime for learning about namespaces, process supervision, threaded logging, scheduling, and kernel memory monitoring. One supervisor manages multiple containers through a local CLI.
 
-### Prerequisites
+[![Runtime checks](https://github.com/kishansaaai/Multi-Container-Runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/kishansaaai/Multi-Container-Runtime/actions/workflows/ci.yml)
 
-- Ubuntu 22.04 or 24.04 in a VM with **Secure Boot OFF** (no WSL)
-- Install build dependencies:
+## Scope and requirements
 
-```bash
+Use **trusted workloads in a disposable Linux VM**. This is an educational runtime, not a security boundary for hostile code. Containers run as root, share the host network, and retain privileges. There is no user namespace, capability dropping, seccomp policy, cgroup accounting, or image management. `chroot` alone does not make privileged processes safe to run on a valuable host.
+
+- Ubuntu 22.04 and 24.04 are covered by CI.
+- User-space builds/tests need a Linux C toolchain and Python 3. WSL2 can run these; privileged integration tests also require namespace support.
+- Loading `monitor.ko` needs a VM with matching kernel headers. Sign the module or disable Secure Boot in the test VM.
+- The supervisor needs root and permission to create PID, mount, UTS and IPC namespaces.
+
+```sh
 sudo apt update
-sudo apt install -y build-essential linux-headers-$(uname -r)
+sudo apt install -y build-essential python3 linux-headers-$(uname -r)
+make                 # engine, static workloads, and monitor.ko
+make ci              # user-space targets only; no kernel headers or root
+bash environment-check.sh --build-only
 ```
 
----
+Workloads are statically linked by default for use in Alpine. Override `WORKLOAD_LDFLAGS=` for dynamic builds only when the rootfs has matching libraries and a loader. `CC`, `CPPFLAGS`, `CFLAGS`, `LDFLAGS`, and `KDIR` are configurable. `make clean` removes build products and preserves logs and running supervisors.
 
-### Build
+## Prepare a root filesystem
 
-```bash
-make
-```
+Download an Alpine minirootfs for your architecture from the [official downloads page](https://alpinelinux.org/downloads/), verify its published checksum, and extract it into a new directory. For example, after placing the archive at `alpine-minirootfs.tar.gz`:
 
-This compiles both `engine` (user-space binary) and `monitor.ko` (kernel module) in one step.
-
----
-
-### Prepare the Alpine Root Filesystem
-
-```bash
+```sh
 mkdir rootfs-base
-wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
-tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
+sudo tar -xzf alpine-minirootfs.tar.gz -C rootfs-base
+sudo cp -a rootfs-base rootfs-alpha
+sudo cp -a rootfs-base rootfs-beta
+sudo cp memory_hog cpu_hog io_pulse rootfs-alpha/
+sudo cp memory_hog cpu_hog io_pulse rootfs-beta/
 ```
 
----
+Each live container needs a separate writable rootfs. The supervisor rejects aliases and symlinks pointing to a directory already in use. Relative paths are resolved using the CLI's working directory. Do not modify or rename rootfs directories while in use.
 
-### Load the Kernel Module
+## Start the supervisor
 
-```bash
-sudo insmod monitor.ko
-ls -l /dev/container_monitor    # verify the control device appeared
+```sh
+sudo insmod monitor.ko       # optional; required for memory monitoring
+sudo ./engine supervisor
 ```
 
----
+The legacy `supervisor <base-rootfs>` spelling remains accepted; that argument is unused. Each `start` or `run` supplies its own rootfs.
 
-### Start the Supervisor
+The default directory is `/run/mini-runtime`, containing:
 
-```bash
-sudo ./engine supervisor ./rootfs-base
+- `control.sock`: private Unix socket, restricted to the supervisor user.
+- `supervisor.lock`: prevents another supervisor from replacing the live socket.
+- `logs/<id>.log`: captured stdout/stderr, with mode 0600.
+
+The runtime directory must be owned by root with mode 0700. Set `MINI_RUNTIME_DIR` to the **same absolute path** for the supervisor and every client to override it:
+
+```sh
+sudo env MINI_RUNTIME_DIR=/run/my-runtime ./engine supervisor
+sudo env MINI_RUNTIME_DIR=/run/my-runtime ./engine ps
 ```
 
-The supervisor binds to `/tmp/mini_runtime.sock` and stays running. If the kernel module is not loaded it prints `kernel monitor not available (running without it)` and continues.
+`/run` usually clears on reboot. Choose a private directory on persistent storage if logs must survive reboots. Excessively long Unix socket paths are rejected.
 
----
+Without the module, the supervisor warns that **memory limits are not enforced**. Other runtime features remain available.
 
-### Create Per-Container Writable Rootfs Copies
+## Commands
 
-Each container requires its own writable copy. Do this **before** launching containers:
+```sh
+# Launch in the background
+sudo ./engine start alpha ./rootfs-alpha /memory_hog --soft-mib 48 --hard-mib 80
 
-```bash
-cp -a ./rootfs-base ./rootfs-alpha
-cp -a ./rootfs-base ./rootfs-beta
-```
+# Wait for completion and return the command's exit status
+sudo ./engine run beta ./rootfs-beta /bin/echo hello
+sudo ./engine logs beta
 
-> No two live containers may share the same writable rootfs directory. The supervisor enforces this and will reject a `start` command with `ERROR: rootfs already in use by container '<id>'` if a collision is detected.
+# Command flags work; -- makes all remaining arguments literal
+sudo ./engine run shell ./rootfs-beta /bin/sh -c 'echo hello; exit 7'
+sudo ./engine run literal ./rootfs-beta /bin/echo -- --soft-mib literal
 
----
-
-### Copy Workload Binaries into the Rootfs
-
-```bash
-cp memory_hog ./rootfs-alpha/
-cp cpu_hog    ./rootfs-alpha/
-cp io_pulse   ./rootfs-alpha/
-```
-
----
-
-### CLI Usage
-
-All CLI commands connect to the running supervisor over `/tmp/mini_runtime.sock`, send one `control_request_t` struct, and print the response.
-
-```bash
-# Start containers in the background
-sudo ./engine start alpha ./rootfs-alpha /bin/sh --soft-mib 48 --hard-mib 80
-sudo ./engine start beta  ./rootfs-beta  /bin/sh --soft-mib 64 --hard-mib 96
-
-# Start with a custom nice value
-sudo ./engine start beta ./rootfs-beta /memory_hog --nice 10
-
-# Run a container and block until it exits (returns exit status)
-sudo ./engine run gamma ./rootfs-gamma /bin/echo hello
-
-# List all tracked containers
 sudo ./engine ps
-
-# Read a container's captured log output
-sudo ./engine logs gamma
-
-# Stop a running container (SIGTERM → SIGKILL after 2 s)
 sudo ./engine stop alpha
 ```
 
-> If `--soft-mib` and `--hard-mib` are omitted, defaults are **40 MiB soft** and **64 MiB hard** (defined as `DEFAULT_SOFT_MIB` and `DEFAULT_HARD_MIB` in `engine.c`).
+- IDs contain 1–63 letters, digits, underscores, or hyphens and begin with a letter or digit. IDs remain reserved during a supervisor session.
+- Commands must be absolute paths inside the rootfs. Up to eight command arguments are supported; excessive or overlong arguments are rejected rather than truncated.
+- Defaults are **40 MiB soft / 64 MiB hard**. Limits must be positive integers with `soft < hard`; overflow is rejected. `--nice` accepts -20 through 19 and sets an absolute priority independent of the supervisor's priority.
+- `start` reports process creation. If setup or execution subsequently fails, inspect `ps` and `logs`. `run` returns the exit status: 127 for execution failure, or `128 + signal` for signal termination.
+- `stop` acknowledges immediately, sends SIGTERM, and escalates to SIGKILL after two seconds if necessary. Use `ps` to observe completion.
+- Stdin is `/dev/null`; interactive shells are not supported. `logs` streams a binary-safe snapshot without the old 8 KiB truncation. A completed `run` guarantees its queued logs have been written.
+- Up to 64 records, including exited containers, are retained. Restart the supervisor to clear history. Existing logs remain readable after restart; starting the same ID in a new session replaces its old log.
 
----
+Press Ctrl+C in the supervisor terminal or send it SIGTERM for orderly shutdown. It stops containers, escalates if needed, reaps children, joins logging threads, drains the queue, and removes the socket. Afterwards, unload the optional module with `sudo rmmod monitor`.
 
-### Running the Soft-Limit Memory Test
+## Memory monitoring
 
-```bash
-cp -a ./rootfs-base ./rootfs-soft5
-cp memory_hog ./rootfs-soft5/
-sudo ./engine start softtest ./rootfs-soft5 /memory_hog --soft-mib 1 --hard-mib 100
-# In another terminal:
-dmesg | grep SOFT
+The module samples the **registered process's RSS** every 100 ms. It does not sum descendant memory or provide a cgroup-style ceiling. Brief spikes can be missed. Run `memory_hog` directly as the container command for these experiments.
+
+```sh
+# Warning-only experiment
+sudo ./engine start softtest ./rootfs-alpha /memory_hog 1 500 --soft-mib 2 --hard-mib 100
+sudo dmesg | grep 'SOFT LIMIT'
+sudo ./engine stop softtest
+# Wait for ps to show stopped before reusing this rootfs.
+
+# Hard-limit experiment; expected exit status 137
+sudo ./engine run hardtest ./rootfs-beta /memory_hog 1 100 --soft-mib 2 --hard-mib 8
+sudo dmesg | grep 'HARD LIMIT'
 ```
 
-Expected `dmesg` output:
+A SIGKILL exit is labeled `killed`. The supervisor cannot distinguish the monitor from the OOM killer or another signal sender; confirm hard-limit events in the kernel log.
 
-```
-[container_monitor] SOFT LIMIT container=softtest pid=<pid> rss=<bytes> limit=1048576
-```
+The monitor uses delayed work in process context, holds PID references to avoid signaling reused PIDs, validates ioctl input, limits registrations, and requires `CAP_SYS_ADMIN` in the initial user namespace. The ioctl ABI uses fixed-width, aligned fields for 32/64-bit compatibility.
 
-The process continues running — the soft limit is warning-only.
+**Upgrade:** rebuild both `engine` and `monitor.ko`, stop the old supervisor, and unload/reload the module. The ioctl layout and private client protocol changed. The previous `/tmp/mini_runtime.sock` and working-directory `logs/` paths are no longer used. Existing log files are preserved but not automatically migrated.
 
----
+## Workloads and scheduling
 
-### Running the Hard-Limit Memory Test
-
-```bash
-cp -a ./rootfs-base ./rootfs-hard
-cp memory_hog ./rootfs-hard/
-sudo ./engine start hardtest ./rootfs-hard /memory_hog --soft-mib 1 --hard-mib 2
-# In another terminal:
-dmesg | grep HARD
+```text
+cpu_hog [seconds]                          default: 10
+memory_hog [chunk_mib] [sleep_ms]           defaults: 8, 1000
+io_pulse [iterations] [sleep_ms] [path]     defaults: 20, 200, /tmp/io_pulse.out
 ```
 
-The supervisor will log: `container hardtest (pid <pid>) exited → hard_limit_killed`
+Arguments are validated for invalid values and overflow. `memory_hog` retains allocations and uses volatile page writes so optimization cannot eliminate RSS growth. It exits on allocation failure instead of spinning. All workloads handle SIGTERM and SIGINT, including as PID 1.
 
----
+For scheduling comparisons, run two `cpu_hog` containers with different `--nice` values and pin their host PIDs to the **same available CPU** using `taskset -pc`. Observe `ps -o pid,ni,comm,%cpu -p <pid1>,<pid2>`. A useful comparison requires CPU contention and a sufficiently long observation window. `memory_hog` sleeps between allocations and is not a good CPU-share benchmark. Nice values affect scheduling weight; they do not impose CPU quotas.
 
-### Running the Scheduler Experiment
+## Validation
 
-```bash
-cp -a ./rootfs-base ./rootfs-alpha
-cp -a ./rootfs-base ./rootfs-beta
-cp memory_hog ./rootfs-alpha/
-cp memory_hog ./rootfs-beta/
-
-sudo ./engine start alpha ./rootfs-alpha /memory_hog --nice -10
-sudo ./engine start beta  ./rootfs-beta  /memory_hog --nice 10
-
-# Observe CPU allocation
-ps -o pid,ni,comm,%cpu -p <pid_alpha> <pid_beta>
+```sh
+make test                 # CLI/protocol/workload tests; no root
+sudo make integration     # also exercises real namespaces and supervision
+make sanitize             # AddressSanitizer + UndefinedBehaviorSanitizer
+sudo make integration     # exercise the sanitizer build as well
+make clean && make        # restore normal static workload builds
+shellcheck environment-check.sh tests/module-smoke.sh
+sudo bash environment-check.sh  # build/load/device/unload preflight in a VM
+make tests/monitor_probe
+sudo sh tests/module-smoke.sh   # memory-limit/module lifecycle checks in a VM
 ```
 
----
+CI builds on Ubuntu 22.04 and 24.04, compiles the module against distribution headers, runs unprivileged and privileged regressions, and checks sanitizer builds. Module loading and real enforcement are separate VM checks: hosted runner kernels may not match installed headers.
 
-### Clean Up
+Tests cover argument forwarding, invalid/truncated IPC, binary logs larger than the queue, rootfs aliases, descriptor leaks, disconnected clients, duplicate supervisors, nonblocking stop, shutdown escalation, and actual RSS growth. They use private temporary runtime directories and a static fixture; no downloaded rootfs is needed.
 
-```bash
-sudo ./engine stop alpha
-sudo ./engine stop beta
-# Send SIGINT or SIGTERM to the supervisor to trigger orderly shutdown
-ps aux | grep engine | grep defunct    # verify no zombies
-dmesg | tail                           # confirm module activity
-sudo rmmod monitor
-```
+## Implementation map
 
----
+| File | Purpose |
+| --- | --- |
+| `engine.c` | CLI, supervisor, namespaces, lifecycle and bounded logging queue |
+| `monitor.c` | Optional character device and delayed memory worker |
+| `monitor_ioctl.h` | Shared ioctl ABI |
+| `workload_common.h` | Workload validation, signals and interruptible sleep |
+| `tests/` | Regression tests and VM module smoke check |
+| `.github/workflows/ci.yml` | Linux builds, tests and shell checks |
 
-### CI Smoke Check
+Logging uses one joinable producer per container and a single consumer. An ordered end-of-log marker ensures the last byte is consumed before returning the exit status. Shutdown never destroys synchronization objects while producers can still use them.
 
-```bash
-make -C boilerplate ci
-```
-
-This compiles only the user-space binary and does **not** require `sudo`, kernel headers, or a running supervisor.
-
----
-
-## 3. Demo with Screenshots
-
-### SS1 — Multi-Container Supervision
-
-Two containers (`alpha` and `beta`) were started under a single supervisor process. The **right terminal** shows the output of `sudo ./engine ps`, confirming both containers are tracked concurrently with their host PIDs (7806 and 7814), state (`running`), start timestamps (`2026-04-14 16:18:12`), and memory limits (`alpha`: SOFT=48 MiB, HARD=80 MiB; `beta`: SOFT=64 MiB, HARD=96 MiB). The **left pane** shows the supervisor's log messages: `[supervisor] started container alpha pid=7806` and `[supervisor] started container beta pid=7814`.
-
-![SS1 — Two containers running concurrently under one supervisor](screenshots/ss1.png)
-
----
-
-### SS2 — Metadata Tracking
-
-The `sudo ./engine ps` command displays a formatted table with columns: `ID`, `PID`, `STATE`, `STARTED`, `SOFT(MiB)`, `HARD(MiB)`. Both `alpha` (PID 7806, SOFT=48, HARD=80) and `beta` (PID 7814, SOFT=64, HARD=96) are listed as `running` with their respective start timestamps (`2026-04-14 16:18:12`). These fields map directly to `container_record_t` members: `.id`, `.host_pid`, `.state`, `.started_at`, `.soft_limit_bytes`, and `.hard_limit_bytes`.
-
-![SS2 — engine ps output showing container metadata](screenshots/ss2.png)
-
----
-
-### SS3 — Bounded-Buffer Logging
-
-Container `gamma` was launched with `sudo ./engine start gamma ./rootfs-gamma /bin/echo hello`. The supervisor's producer thread read `hello` from the pipe and pushed it into `bounded_buffer_t`; the consumer thread wrote it to `logs/gamma.log`. Running `./engine logs gamma` retrieved and printed `hello`, confirming the full producer→buffer→consumer→file pipeline. The left pane also shows an earlier duplicate-rootfs attempt correctly rejected with `ERROR: rootfs already in use by container 'alpha'`, and the gamma container's clean exit: `[supervisor] container gamma (pid 8166) exited → exited`.
-
-![SS3 — Bounded-buffer log pipeline and engine logs output](screenshots/ss3.png)
-
----
-
-### SS4 — CLI and IPC
-
-The command `sudo ./engine start delta ./rootfs-delta /bin/sh` was issued from a separate terminal (right pane). The CLI process connected to `/tmp/mini_runtime.sock`, serialized a `control_request_t` with `kind = CMD_START`, and received back `Started container 'delta' (pid 8317)`. The left pane confirms `[supervisor] started container delta pid=8317`, demonstrating the UNIX domain socket control channel (Path B) end-to-end.
-
-![SS4 — CLI command sent over UNIX socket and supervisor response](screenshots/ss4.png)
-
----
-
-### SS5 — Soft-Limit Warning
-
-Container `softtest` was started with `sudo ./engine start softtest ./rootfs-soft5 /memory_hog --soft-mib 1 --hard-mib 100`. When RSS exceeded 1 MiB, the kernel module's 100 ms timer callback invoked `log_soft_limit_event()`, issuing a `KERN_WARNING` via `printk`. Running `sudo dmesg | grep SOFT` showed:
-
-```
-[ 7883.077064] [container_monitor] SOFT LIMIT container=softtest pid=11498 rss=8986624 limit=1048576
-```
-
-The process was **not** terminated — the soft limit is warning-only. The supervisor log on the left shows `[supervisor] started container softtest pid=11498` still running.
-
-![SS5 — dmesg showing soft-limit warning with process still running](screenshots/ss5.png)
-
----
-
-### SS6 — Hard-Limit Enforcement
-
-Container `hardtest` was started with `sudo ./engine start hardtest ./rootfs-hard /memory_hog --soft-mib 1 --hard-mib 2`. When RSS exceeded 2 MiB, the timer callback invoked `kill_process()`, which called `send_sig(SIGKILL, task, 0)` to terminate the process. Running `sudo dmesg | grep HARD` showed:
-
-```
-[ 9328.366418] [container_monitor] HARD LIMIT container=hardtest pid=11781 rss=5898240 limit=2097152
-```
-
-The supervisor's `reap_children()` detected the kill with `stop_requested = 0` and set the container state to `CONTAINER_KILLED`. The left pane confirms:
-
-```
-[supervisor] container hardtest (pid 11781) exited → hard_limit_killed
-```
-
-![SS6 — Supervisor log confirming hard-limit kill and container state update](screenshots/ss6.png)
-
----
-
-### SS7 — Scheduling Experiment
-
-Two containers ran `/memory_hog` simultaneously with contrasting nice values: `alpha` at `nice -10` (higher priority) and `beta` at `nice +10` (lower priority). Running `ps -o pid,ni,comm,%cpu -p 23761,23769` showed:
-
-```
-PID    NI  COMMAND      %CPU
-23761  -10  memory_hog   1.7
-23769   10  memory_hog   1.5
-```
-
-The CPU usage values are close because `memory_hog` is memory-bound — most time is spent in `malloc` and `memset`, triggering page faults rather than CPU computation. When processes frequently block on memory operations, CFS weight differences have limited impact. For a CPU-bound workload like `cpu_hog`, a nice-value gap of 20 would produce a clearly asymmetric CPU split (~9× weight advantage for `alpha`). The experiment confirms that scheduling priority effects are most pronounced under CPU contention, not memory pressure.
-
-![SS7 — ps output showing CPU usage of two containers with different nice values](screenshots/ss7.png)
-
----
-
-### SS8 — Clean Teardown
-
-After `sudo ./engine stop alpha` and `sudo ./engine stop beta`, the supervisor set `stop_requested = 1` on both containers before sending `SIGTERM`. The **left pane** shows both containers exiting as `stopped`:
-
-```
-[supervisor] container alpha (pid 23761) exited → stopped
-[supervisor] container beta (pid 23769) exited → stopped
-[supervisor] shutting down...
-[supervisor] exited cleanly
-```
-
-The **right pane** shows `ps aux | grep defunct` returned no results, and `ps aux | grep engine` lists only the `grep` process itself and an unrelated `ibus-engine-simple` binary — confirming zero zombie processes remain after the orderly shutdown.
-
-![SS8 — Clean supervisor shutdown with no zombies in ps output](screenshots/ss8.png)
-
----
-
-## 4. Engineering Analysis
-
-### 4.1 Isolation Mechanisms
-
-Each container is created with `clone()` using three namespace flags: `CLONE_NEWPID`, `CLONE_NEWUTS`, and `CLONE_NEWNS`. `CLONE_NEWPID` gives the container its own PID namespace so its init process sees itself as PID 1. `CLONE_NEWUTS` allows `sethostname(cfg->id, strlen(cfg->id))` to set the container's hostname without affecting the host. `CLONE_NEWNS` creates a private mount namespace so `/proc` can be mounted inside the container without polluting the host's mount table.
-
-Filesystem isolation uses `chroot(cfg->rootfs)` followed by `chdir("/")` inside `child_fn()`. After `chroot`, the container sees only its assigned rootfs directory as `/`. Then `mount("proc", "/proc", "proc", 0, NULL)` is called so tools like `ps` work correctly inside. Each container receives its own copy of `rootfs-base` (e.g., `rootfs-alpha`, `rootfs-beta`) to prevent filesystem writes from affecting other containers.
-
-The host kernel is still shared across all containers. Network, IPC, and cgroup namespaces are not isolated in this implementation. The host kernel's scheduler, memory manager, and device drivers serve all containers equally.
-
----
-
-### 4.2 Supervisor and Process Lifecycle
-
-The supervisor is a long-running daemon started once. CLI commands are short-lived processes that connect to the supervisor over the UNIX socket, send one request, and exit. This split decouples the lifetime of CLI invocations from the lifetime of containers — containers keep running even after the CLI process exits.
-
-The supervisor uses the **self-pipe trick** for `SIGCHLD`. `sigchld_handler()` writes one byte to `sigchld_pipe[1]`. The main `select()` loop detects readability on `sigchld_pipe[0]`, drains the pipe, and calls `reap_children()` safely in process context. `reap_children()` calls `waitpid(-1, &status, WNOHANG)` in a loop until all exited children are reaped, preventing zombie accumulation.
-
-Each container's metadata lives in a `container_record_t` node in the `ctx.containers` linked list, guarded by `ctx.metadata_lock`. The `stop_requested` flag is set to 1 inside `handle_stop()` before calling `kill()`. In `reap_children()`: if `SIGKILL` arrives and `stop_requested == 0`, state becomes `CONTAINER_KILLED` (hard-limit kill); otherwise state becomes `CONTAINER_STOPPED` (manual stop).
-
----
-
-### 4.3 IPC, Threads, and Synchronization
-
-**Path A — logging (pipes):** When a container is launched, `pipe()` creates a file descriptor pair. Inside `child_fn()`, `dup2(cfg->log_write_fd, STDOUT_FILENO)` and `dup2(cfg->log_write_fd, STDERR_FILENO)` redirect container output to the write end. The supervisor closes the write end and passes the read end to a per-container producer thread. The producer reads chunks into `log_item_t` structs and calls `bb_push()` to insert them into `bounded_buffer_t`. A single consumer thread calls `bb_pop()` and appends each item to the container's log file under `logs/`.
-
-**Path B — control (UNIX domain socket):** The supervisor binds `SOCK_STREAM` at `/tmp/mini_runtime.sock`. CLI clients `connect()`, write a `control_request_t`, and read back a `control_response_t`. For `CMD_RUN`, the client fd is stored in `container_record_t.run_client_fd` and held open until `reap_children()` sends the final exit status and closes it.
-
-**Synchronization rationale for `bounded_buffer_t`:** The buffer uses a `pthread_mutex_t` protecting `head`, `tail`, and `count`, plus two `pthread_cond_t` variables (`not_empty`, `not_full`). Without the mutex, concurrent push and pop calls could corrupt the ring buffer indices. Without the condition variables, threads would busy-wait when the buffer is full or empty, wasting CPU. `bb_shutdown()` broadcasts on both conditions so all threads unblock and exit. `bb_pop()` returns `-1` only when `count == 0 AND shutting_down == 1`, so the consumer drains all remaining items before exiting — no log data is lost on shutdown.
-
-Container metadata is protected by a separate `ctx.metadata_lock`, decoupled from the log buffer mutex so slow log writes cannot block CLI commands like `ps`.
-
----
-
-### 4.4 Memory Management and Enforcement
-
-RSS (Resident Set Size) measures the number of physical memory pages currently resident in RAM for a process. `get_rss_bytes(pid)` in `monitor.c` calls `get_task_mm()` to obtain the process's `mm_struct`, then `get_mm_rss(mm)` to read the page count, multiplied by `PAGE_SIZE`. RSS does **not** include swapped-out pages, unmapped file-backed pages, or shared pages counted for other processes.
-
-Soft and hard limits serve different purposes. When RSS first exceeds the soft limit, `log_soft_limit_event()` issues a `KERN_WARNING` and sets `entry->soft_triggered = 1` so the warning fires only once per container. The process keeps running. When RSS exceeds the hard limit, `kill_process()` calls `send_sig(SIGKILL, task, 0)` and removes the entry from the monitored list.
-
-Enforcement belongs in kernel space because a user-space polling loop reading `/proc/<pid>/status` is subject to scheduler delays and can miss brief memory spikes. The kernel timer fires every 100 ms and reads `get_mm_rss()` directly, giving timely and accurate RSS data without depending on the container being scheduled or cooperating.
-
----
-
-### 4.5 Scheduling Behavior
-
-Linux CFS assigns CPU time proportional to per-process weight, derived from the nice value. `nice()` is called inside `child_fn()` before `execv()` using `cfg->nice_value`, which comes from the `--nice` CLI flag stored in `container_record_t.nice_value`.
-
-In the experiment (SS7), two containers ran `memory_hog` with `nice -10` (alpha) and `+10` (beta). The observed `%CPU` values were similar (1.7 vs 1.5). This is expected because `memory_hog` spends most time in `malloc()` and `memset()`, triggering page faults and kernel memory allocation rather than CPU computation. When processes frequently block on memory operations, they spend less time on the run queue, limiting how much CFS weight differences can express themselves.
-
-For a CPU-bound workload like `cpu_hog` (which loops continuously with no blocking), a nice-value gap of 20 would produce a clearly asymmetric CPU split. The experiment confirms that nice-value scheduling effects are most visible under CPU contention, not memory or I/O contention.
-
----
-
-## 5. Design Decisions and Tradeoffs
-
-### 5.1 Namespace Isolation
-
-**Choice:** `CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS` with `chroot()` in `child_fn()`.
-
-**Tradeoff:** `pivot_root` would be more secure than `chroot` because it prevents escaping the container root via `..` traversal if the container process gains privilege. `chroot` was chosen because it is simpler and does not require a separate `put_old` mount point inside the container rootfs.
-
-**Justification:** For the project's scope, `chroot` provides sufficient filesystem isolation. The Alpine minirootfs contains no privilege-escalation tools, and the threat model does not include adversarial containers.
-
----
-
-### 5.2 Supervisor Architecture
-
-**Choice:** Single binary in two modes — long-running daemon and short-lived CLI client — communicating over a UNIX domain socket at `/tmp/mini_runtime.sock`.
-
-**Tradeoff:** A FIFO would be simpler but is unidirectional. The socket allows full-duplex communication: the CLI receives a response back, and `CMD_RUN` can hold the connection open until the container exits.
-
-**Justification:** The `run` command's blocking semantics require the supervisor to send the final exit status asynchronously when the container exits. This maps cleanly onto a persistent socket connection but is awkward with a FIFO.
-
----
-
-### 5.3 IPC and Logging Pipeline
-
-**Choice:** Bounded ring buffer (capacity 64) with one joinable consumer thread and one detached producer thread per container.
-
-**Tradeoff:** Producer threads are detached (`PTHREAD_CREATE_DETACHED`), so the supervisor cannot explicitly confirm they have exited before terminating. They exit naturally when the container's pipe reaches EOF.
-
-**Justification:** The consumer thread is joinable and drains all remaining buffer items before returning. Since producers push data before their pipe closes, the consumer's drain pass is sufficient to prevent data loss. Avoiding joinable producers keeps `container_record_t` simpler by not storing per-container `pthread_t` values.
-
----
-
-### 5.4 Kernel Memory Monitor
-
-**Choice:** Periodic 100 ms timer using `mod_timer`. `mutex_trylock()` is used in the callback because timer callbacks run in softirq context where sleeping is forbidden.
-
-**Tradeoff:** Polling at 100 ms may miss a very brief spike that exceeds the hard limit and drops back within one interval. Event-driven enforcement via cgroup memory notifications would be more precise but significantly more complex to implement.
-
-**Justification:** `memory_hog` allocates 8 MiB per second, so 100 ms polling catches violations reliably within one allocation step. The tradeoff is acceptable for the workloads used in this project.
-
----
-
-### 5.5 Scheduling Experiments
-
-**Choice:** Nice values via `nice()` in `child_fn()`, measured with `ps -o pid,ni,comm,%cpu`.
-
-**Tradeoff:** Nice values affect CFS weight but provide no hard CPU bandwidth guarantees. `sched_setaffinity` would give more deterministic isolation but is more complex to expose through the existing CLI structure.
-
-**Justification:** Nice values are directly observable with standard tools and integrate cleanly into the existing `control_request_t.nice_value` and `child_config_t.nice_value` fields without any additional data structures.
-
----
-
-## 6. Scheduler Experiment Results
-
-### Experiment Setup
-
-Two containers were started simultaneously, both running `memory_hog` (allocating 8 MiB per second by default), with different nice values:
-
-> **Note:** The snapshot below does not reflect steady-state scheduling and is affected by memory-bound blocking behavior.
-
-| Container | PID   | Nice Value | Workload   |
-|-----------|-------|------------|------------|
-| alpha     | 23761 | -10        | memory_hog |
-| beta      | 23769 | +10        | memory_hog |
-
----
-
-### Observed Results (SS7)
-
-```
-PID    NI  COMMAND      %CPU
-23761  -10  memory_hog   1.7
-23769   10  memory_hog   1.5
-```
-
----
-
-### Interpretation
-
-Both containers showed similar CPU usage at the `ps` snapshot. `memory_hog` repeatedly calls `malloc()` and `memset()`, causing page faults and kernel-side memory allocation. The process is not continuously runnable — it frequently blocks waiting on memory operations. When neither process is consistently on the run queue, CFS has fewer scheduling decisions to make, and weight differences have limited impact.
-
-The slight difference in values (1.7 vs 1.5) is within measurement noise for a single `ps` snapshot and does not indicate a scheduling anomaly. It reflects short-window CPU averaging at the moment of sampling.
-
----
-
-### Conclusion
-
-For a CPU-bound workload like `cpu_hog` — which loops with no blocking syscalls — a nice-value difference of 20 would produce a clearly asymmetric CPU split, with `alpha` receiving roughly **9× the CFS weight** of `beta`. The experiment confirms that scheduling priority effects are most pronounced under CPU contention, not memory or I/O pressure.
-
-The `--nice` flag flows end-to-end through the implementation:
-
-```
-CLI parsing → control_request_t.nice_value → child_config_t.nice_value → nice() syscall inside child_fn() before execv()
-```
+Original demonstration images remain in [`screenshots/`](screenshots/). They show an earlier version's output and paths; the instructions above describe the current implementation.

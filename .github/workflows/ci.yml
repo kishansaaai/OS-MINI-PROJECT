@@ -1,0 +1,38 @@
+name: Runtime checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and lint dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential linux-headers-generic shellcheck
+      - name: Build and test without privileges
+        run: make test CFLAGS="-O2 -g -Werror"
+      - name: Exercise Linux namespaces and supervisor lifecycle
+        run: sudo make integration
+      - name: Compile the kernel module
+        run: |
+          kernel_headers=$(printf '%s\n' /usr/src/linux-headers-*-generic | sort -V | tail -n 1)
+          make module KDIR="$kernel_headers" W=1
+          make tests/monitor_probe
+      - name: Check shell script
+        run: shellcheck environment-check.sh tests/module-smoke.sh
+      - name: Check memory safety
+        run: make sanitize
+      - name: Check supervisor memory safety
+        run: sudo make integration

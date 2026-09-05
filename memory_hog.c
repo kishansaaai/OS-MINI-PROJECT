@@ -1,65 +1,47 @@
-/*
- * memory_hog.c - Memory pressure workload for soft / hard limit testing.
- *
- * Default behavior:
- *   - allocate 8 MiB every second
- *   - touch each page so RSS actually grows
- *
- * Usage:
- *   /memory_hog [chunk_mb] [sleep_ms]
- *
- * If you plan to copy this binary into an Alpine rootfs, build it in a way
- * that is runnable inside that filesystem, such as static linking or
- * rebuilding it from inside the rootfs/toolchain you choose.
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+/* Memory pressure workload: memory_hog [chunk_mib] [sleep_ms]. */
+#include <stdint.h>
 #include <unistd.h>
+#include "workload_common.h"
 
-static size_t parse_size_mb(const char *arg, size_t fallback)
-{
-    char *end = NULL;
-    unsigned long value = strtoul(arg, &end, 10);
-
-    if (!arg || *arg == '\0' || (end && *end != '\0') || value == 0)
-        return fallback;
-    return (size_t)value;
-}
-
-static useconds_t parse_sleep_ms(const char *arg, useconds_t fallback)
-{
-    char *end = NULL;
-    unsigned long value = strtoul(arg, &end, 10);
-
-    if (!arg || *arg == '\0' || (end && *end != '\0'))
-        return fallback;
-    return (useconds_t)(value * 1000U);
-}
+struct allocation {
+    struct allocation *next;
+    unsigned char data[];
+};
 
 int main(int argc, char *argv[])
 {
-    const size_t chunk_mb = (argc > 1) ? parse_size_mb(argv[1], 8) : 8;
-    const useconds_t sleep_us = (argc > 2) ? parse_sleep_ms(argv[2], 1000U) : 1000U * 1000U;
-    const size_t chunk_bytes = chunk_mb * 1024U * 1024U;
-    int count = 0;
-
-    while (1) {
-        char *mem = malloc(chunk_bytes);
-        if (!mem) {
-            printf("malloc failed after %d allocations\n", count);
-            fflush(stdout);
-            continue;
-        }
-
-        memset(mem, 'A', chunk_bytes);
-        count++;
-        printf("allocation=%d chunk=%zuMB total=%zuMB\n",
-               count, chunk_mb, (size_t)count * chunk_mb);
-        fflush(stdout);
-        usleep(sleep_us);
+    unsigned long chunk_mib = 8, sleep_ms = 1000;
+    if (argc > 3 || (argc > 1 && workload_parse(argv[1], 1,
+            (SIZE_MAX - sizeof(struct allocation)) / (1024 * 1024), &chunk_mib)) ||
+        (argc > 2 && workload_parse(argv[2], 0, UINT_MAX, &sleep_ms))) {
+        fprintf(stderr, "Usage: %s [positive chunk_mib] [nonnegative sleep_ms]\n", argv[0]);
+        return 1;
     }
-
-    return 0;
+    workload_init();
+    const size_t bytes = (size_t)chunk_mib * 1024 * 1024;
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return 1;
+    size_t count = 0;
+    int result = 0;
+    struct allocation *head = NULL;
+    while (!workload_stopped) {
+        struct allocation *block = malloc(sizeof(*block) + bytes);
+        if (!block) { perror("memory_hog: malloc"); result = 1; break; }
+        block->next = head;
+        head = block;
+        /* Volatile page writes cannot be optimized away at -O2. Retain all blocks. */
+        volatile unsigned char *data = block->data;
+        for (size_t i = 0; i < bytes; i += (size_t)page_size) data[i] = 'A';
+        data[bytes - 1] = 'A';
+        count++;
+        printf("allocation=%zu chunk=%luMiB\n", count, chunk_mib);
+        fflush(stdout);
+        workload_sleep(sleep_ms);
+    }
+    while (head) {
+        struct allocation *next = head->next;
+        free(head);
+        head = next;
+    }
+    return result;
 }

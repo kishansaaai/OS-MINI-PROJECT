@@ -1,50 +1,29 @@
-/*
- * cpu_hog.c - CPU-bound workload for scheduler experiments.
- *
- * Usage:
- *   /cpu_hog [seconds]
- *
- * The program burns CPU and prints progress once per second so students
- * can compare completion times and responsiveness under different
- * priorities or CPU-affinity settings.
- *
- * If you copy this binary into an Alpine rootfs, make sure it is built in a
- * format that can run there.
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-
-static unsigned int parse_seconds(const char *arg, unsigned int fallback)
-{
-    char *end = NULL;
-    unsigned long value = strtoul(arg, &end, 10);
-
-    if (!arg || *arg == '\0' || (end && *end != '\0') || value == 0)
-        return fallback;
-    return (unsigned int)value;
-}
+/* CPU-bound workload: cpu_hog [seconds]. */
+#include "workload_common.h"
 
 int main(int argc, char *argv[])
 {
-    const unsigned int duration = (argc > 1) ? parse_seconds(argv[1], 10) : 10;
-    const time_t start = time(NULL);
-    time_t last_report = start;
+    unsigned long duration = 10;
+    if (argc > 2 || (argc == 2 && workload_parse(argv[1], 1, UINT_MAX, &duration))) {
+        fprintf(stderr, "Usage: %s [seconds: 1..%u]\n", argv[0], UINT_MAX);
+        return 1;
+    }
+    workload_init();
+    struct timespec start, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return 1;
+    unsigned long last_report = 0;
     volatile unsigned long long accumulator = 0;
-
-    while ((unsigned int)(time(NULL) - start) < duration) {
+    while (!workload_stopped) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 1;
+        time_t elapsed = now.tv_sec - start.tv_sec - (now.tv_nsec < start.tv_nsec);
+        if ((unsigned long)elapsed >= duration) break;
         accumulator = accumulator * 1664525ULL + 1013904223ULL;
-
-        if (time(NULL) != last_report) {
-            last_report = time(NULL);
-            printf("cpu_hog alive elapsed=%ld accumulator=%llu\n",
-                   (long)(last_report - start),
-                   accumulator);
+        if ((unsigned long)elapsed != last_report) {
+            last_report = (unsigned long)elapsed;
+            printf("cpu_hog alive elapsed=%lu accumulator=%llu\n", last_report, accumulator);
             fflush(stdout);
         }
     }
-
-    printf("cpu_hog done duration=%u accumulator=%llu\n", duration, accumulator);
+    printf("cpu_hog done duration=%lu accumulator=%llu\n", duration, accumulator);
     return 0;
 }
